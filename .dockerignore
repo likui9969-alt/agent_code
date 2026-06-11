@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist/
+build/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Tests & dev
+test_*.py
+tests/
+
+# Docs
+*.md
+!README.md
+
+# Docker
+docker/
+!docker/docker-entrypoint.sh
+!docker/redis.conf
+
+# Env (use .env.production)
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
