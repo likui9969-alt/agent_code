@@ -24,6 +24,8 @@ from typing import Any, Iterator
 
 import httpx
 
+from frontend.config import API_AUTH_TOKEN
+
 
 def _iter_sse_events(lines) -> Iterator[dict]:
     """Parse SSE ``event:`` + ``data:`` pairs (mirrors test_stream.parse_sse)."""
@@ -49,6 +51,13 @@ class APIClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=120.0)
 
+    def _headers(self) -> dict[str, str]:
+        """Return request headers, including auth token when configured."""
+        h: dict[str, str] = {}
+        if API_AUTH_TOKEN:
+            h["Authorization"] = f"Bearer {API_AUTH_TOKEN}"
+        return h
+
     # ── Core endpoints ──────────────────────────────────────────────────
 
     def post_chat(
@@ -63,7 +72,7 @@ class APIClient:
             body["thread_id"] = thread_id
         if project_path:
             body["project_path"] = project_path
-        r = self._client.post(f"{self.base_url}/chat", json=body)
+        r = self._client.post(f"{self.base_url}/chat", json=body, headers=self._headers())
         r.raise_for_status()
         return r.json()
 
@@ -79,7 +88,7 @@ class APIClient:
             body["thread_id"] = thread_id
         if project_path:
             body["project_path"] = project_path
-        with self._client.stream("POST", f"{self.base_url}/chat/stream", json=body) as r:
+        with self._client.stream("POST", f"{self.base_url}/chat/stream", json=body, headers=self._headers()) as r:
             r.raise_for_status()
             yield from _iter_sse_events(r.iter_lines())
 
@@ -97,6 +106,7 @@ class APIClient:
         r = self._client.post(
             f"{self.base_url}/chat/{thread_id}/resume",
             json=body,
+            headers=self._headers(),
         )
         r.raise_for_status()
         return r.json()
@@ -116,13 +126,14 @@ class APIClient:
             "POST",
             f"{self.base_url}/chat/{thread_id}/resume/stream",
             json=body,
+            headers=self._headers(),
         ) as r:
             r.raise_for_status()
             yield from _iter_sse_events(r.iter_lines())
 
     def get_state(self, thread_id: str) -> dict:
         """GET /chat/{id}/state."""
-        r = self._client.get(f"{self.base_url}/chat/{thread_id}/state")
+        r = self._client.get(f"{self.base_url}/chat/{thread_id}/state", headers=self._headers())
         r.raise_for_status()
         return r.json()
 
@@ -132,7 +143,7 @@ class APIClient:
 
     def list_tools(self) -> dict:
         """GET /tools."""
-        return self._client.get(f"{self.base_url}/tools").json()
+        return self._client.get(f"{self.base_url}/tools", headers=self._headers()).json()
 
     def configure_llm(
         self,
@@ -145,7 +156,7 @@ class APIClient:
             body["api_key"] = api_key
         if model is not None:
             body["model"] = model
-        r = self._client.post(f"{self.base_url}/settings/llm", json=body)
+        r = self._client.post(f"{self.base_url}/settings/llm", json=body, headers=self._headers())
         r.raise_for_status()
         return r.json()
 

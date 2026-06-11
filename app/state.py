@@ -61,6 +61,7 @@ class AgentState(TypedDict):
     iteration_count: int
     human_feedback: str
     approval_status: str
+    error: str
     tool_calls: list[ToolCall]
     tool_results: Annotated[list[dict], _add]
     messages: Annotated[list[BaseMessage], add_messages]

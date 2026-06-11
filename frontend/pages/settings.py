@@ -45,7 +45,7 @@ def render_settings() -> None:
     st.subheader("🔑 API Key")
     current_key = st.session_state.get("api_key", "")
     if current_key:
-        st.caption(f"已配置: `{current_key[:8]}...{current_key[-4:]}`")
+        st.caption(f"已配置: `{current_key[:4]}...{current_key[-4:]}`")
     api_key = st.text_input(
         "输入 API Key", type="password",
         value=current_key, placeholder="sk-...",

@@ -124,6 +124,14 @@ class StateResponse(BaseModel):
 # ============================================================================
 
 
+class ErrorResponse(BaseModel):
+    """Returned when the agent pipeline stops due to an LLM error."""
+    success: bool = False
+    error: str
+    detail: str = ""
+    thread_id: str
+
+
 class StreamEventSchema(BaseModel):
     """Shape of the JSON payload inside an SSE ``data:`` line."""
 

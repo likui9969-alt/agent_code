@@ -1,4 +1,23 @@
-"""Project workspace — real filesystem access scoped to an open project root."""
+"""Project workspace — real filesystem access scoped to an open project root.
+
+Path-traversal protection
+-------------------------
+Every filesystem operation goes through :func:`resolve_path`, which enforces
+a **canonical-boundary** principle:
+
+1. **Reject absolute paths** — Unix ``/etc/passwd``, Windows ``C:\\...``, and
+   UNC ``\\\\server\\share`` are refused outright (before they can be silently
+   normalised into relative paths).
+2. **Null-byte rejection** — ``\\x00`` can truncate paths in C-level APIs.
+3. **Resolve to canonical form** — ``Path.resolve()`` follows symlinks,
+   collapses ``..``, and normalises case / separators.
+4. **Canonical boundary check** — the fully-resolved path **must** be a
+   descendant of the project root.  This is the definitive defence; earlier
+   checks are fast-path heuristics.
+5. **Symlink-component walk** — when the path exists, each component is
+   inspected individually so symlinks that escape the workspace are detected
+   even if the final resolved path happens to land back inside the root.
+"""
 
 from __future__ import annotations
 
@@ -53,23 +72,145 @@ def require_project_root() -> Path:
     return root
 
 
-def resolve_path(relative_path: str, *, must_exist: bool = False) -> Path:
-    """Resolve *relative_path* under the project root (blocks traversal)."""
-    root = require_project_root()
-    rel = relative_path.replace("\\", "/").strip()
-    if rel in ("", "."):
-        return root
-    if rel.startswith("/"):
-        rel = rel.lstrip("/")
-    if ".." in Path(rel).parts:
-        raise ValueError(f"Path traversal not allowed: {relative_path}")
+# ============================================================================
+# Absoluteness helpers (Windows + Unix)
+# ============================================================================
 
-    full = (root / rel).resolve()
+
+def _is_absolute_path(rel: str) -> bool:
+    """Return ``True`` if *rel* looks like an absolute path on any platform.
+
+    Handles:
+    - Unix: ``/etc/passwd``
+    - Windows drive-letter: ``C:\\Windows`` or ``C:/Windows``
+    - Windows UNC: ``\\\\server\\share\\...``
+    - Windows drive-relative: ``C:foo`` (interpreted relative to CWD on
+      that drive — rejected for safety).
+    """
+    if not rel:
+        return False
+    # Unix absolute
+    if rel.startswith("/"):
+        return True
+    # Windows UNC
+    if rel.startswith("\\\\"):
+        return True
+    # Windows drive-letter absolute (C:\...) or drive-relative (C:foo)
+    if len(rel) >= 2 and rel[1] == ":":
+        return True
+    return False
+
+
+# ============================================================================
+# Core path resolver — canonical-boundary security model
+# ============================================================================
+
+
+def resolve_path(relative_path: str, *, must_exist: bool = False) -> Path:
+    """Resolve *relative_path* under the project root with traversal protection.
+
+    Security model (defence-in-depth, ordered):
+        1. Null-byte rejection.
+        2. Absolute-path rejection (both Unix and Windows).
+        3. Normalise separators.
+        4. Build candidate path, resolve to canonical form.
+        5. **Canonical boundary check** — the definitive defence.
+        6. (Optional) existence check.
+        7. (When the path exists) symlink-component walk.
+
+    Raises:
+        ValueError: if the path is absolute, contains a null byte, attempts
+                    to escape the workspace, or cannot be resolved.
+        FileNotFoundError: if *must_exist* is ``True`` and the path does not
+                    exist.
+    """
+    root = require_project_root()
+
+    # ── 1. Null-byte rejection ─────────────────────────────────────────
+    if "\x00" in relative_path:
+        raise ValueError(
+            f"Path contains null byte (potential C-string truncation attack): "
+            f"{relative_path!r}"
+        )
+
+    # ── 2. Normalise separators ────────────────────────────────────────
+    cleaned = relative_path.replace("\\", "/").strip()
+
+    # Empty / "." → project root
+    if cleaned in ("", "."):
+        return root
+
+    # ── 3. Reject absolute paths ───────────────────────────────────────
+    if _is_absolute_path(cleaned):
+        raise ValueError(
+            f"Absolute paths are not allowed: {relative_path!r}. "
+            f"Use a path relative to the project root."
+        )
+
+    # ── 4. Fast-path: reject un-resolved ".." segments ──────────────────
+    if ".." in Path(cleaned).parts:
+        raise ValueError(
+            f"Path traversal detected ('..' component): {relative_path!r}"
+        )
+
+    # ── 5. Build candidate & resolve to canonical form ─────────────────
+    candidate = root / cleaned
+    try:
+        full = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(f"Cannot resolve path {relative_path!r}: {exc}") from exc
+
+    # ── 6. Canonical boundary check (definitive) ───────────────────────
     if not full.is_relative_to(root):
-        raise ValueError(f"Path outside project root: {relative_path}")
+        raise ValueError(
+            f"Path escapes project root: {relative_path!r} "
+            f"(resolved to {full}, root is {root})"
+        )
+
+    # ── 7. Optional existence ──────────────────────────────────────────
     if must_exist and not full.exists():
-        raise FileNotFoundError(f"Path not found: {relative_path}")
+        raise FileNotFoundError(f"Path not found: {relative_path!r}")
+
+    # ── 8. Symlink-component walk (defence-in-depth) ───────────────────
+    if candidate.exists():
+        _verify_symlink_chain(root, candidate)
+
     return full
+
+
+def _verify_symlink_chain(root: Path, target: Path) -> None:
+    """Walk each component from *root* to *target* and verify that no
+    symlink resolves outside the workspace.
+
+    This is defence-in-depth: :func:`resolve_path` already checks the
+    fully-resolved destination via ``is_relative_to``.  This walk catches
+    a TOCTOU edge case where a symlink inside the workspace points to a
+    sibling directory that later resolves *back inside* the root — letting
+    the final ``is_relative_to`` check pass while the symlink itself
+    traverses through forbidden territory.
+    """
+    try:
+        rel_parts = target.relative_to(root).parts
+    except ValueError:
+        # Should not happen — resolve_path already checked is_relative_to
+        raise ValueError(
+            f"Symlink chain escapes project root: {target} is not under {root}"
+        )
+
+    current = root
+    for part in rel_parts:
+        component = current / part
+        try:
+            if component.is_symlink():
+                resolved_target = component.resolve(strict=True)
+                if not resolved_target.is_relative_to(root):
+                    raise ValueError(
+                        f"Symlink escapes project root: {component} -> {resolved_target}"
+                    )
+        except OSError:
+            # Broken symlink or race — let the canonical check handle it
+            pass
+        current = component
 
 
 def relative_path(full: Path) -> str:

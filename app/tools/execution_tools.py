@@ -1,4 +1,10 @@
-"""Execution tools — run Python files from the open project directory."""
+"""Execution tools — run Python files from the open project directory.
+
+.. warning::
+    The execution backend is **not implemented**.  Only syntax validation
+    is performed.  To enable real execution, replace :func:`_validate_syntax`
+    with a proper sandbox (e.g. ``subprocess`` in a container).
+"""
 
 from __future__ import annotations
 
@@ -7,19 +13,37 @@ from app.tools.base import BaseTool, ToolResult
 from app.tools.registry import tool_registry
 
 
+def _validate_syntax(source: str) -> tuple[str, str]:
+    """Compile-check *source* for syntax errors only — does NOT execute.
+
+    Returns:
+        (output, error): *output* describes the validation result;
+        *error* is empty on success or contains the SyntaxError message.
+    """
+    try:
+        compile(source, "<sandbox>", "exec")
+    except SyntaxError as exc:
+        return "", f"SyntaxError: {exc.msg} (line {exc.lineno})"
+    return (
+        "Syntax validation passed. "
+        "Code was NOT executed — the Python execution backend is not implemented.",
+        "",
+    )
+
+
 class RunPythonTool(BaseTool):
     name = "run_python"
     description = (
-        "Execute Python code in a sandbox (mock). "
-        "Provide either *code* as a string or *file_path* (relative) to run a project file. "
-        "Returns stdout, stderr, and exit_code."
+        "Validate Python syntax and (when backend is wired) execute code. "
+        "Currently only syntax validation is available — no real execution. "
+        "Provide either *code* as a string or *file_path* (relative) to run a project file."
     )
     parameters = {
         "type": "object",
         "properties": {
             "code": {
                 "type": "string",
-                "description": "Python source code to execute directly.",
+                "description": "Python source code to validate (and eventually execute).",
             },
             "file_path": {
                 "type": "string",
@@ -27,7 +51,7 @@ class RunPythonTool(BaseTool):
             },
             "timeout_seconds": {
                 "type": "integer",
-                "description": "Max execution time. Default: 30.",
+                "description": "Max execution time. Default: 30. (Not yet used.)",
             },
         },
         "required": [],
@@ -39,6 +63,7 @@ class RunPythonTool(BaseTool):
         file_path: str | None = None,
         timeout_seconds: int = 30,
     ) -> ToolResult:
+        # ── Resolve source ──
         if file_path:
             try:
                 fp = resolve_path(file_path, must_exist=True)
@@ -65,60 +90,36 @@ class RunPythonTool(BaseTool):
                 error="Either 'code' or 'file_path' must be provided.",
             )
 
-        stdout, stderr, exit_code = _mock_execute(source)
+        # ── Syntax validation only — no real execution ──
+        output, err = _validate_syntax(source)
+
+        if err:
+            return ToolResult(
+                success=False,
+                output=output,
+                error=err,
+                metadata={
+                    "source_type": source_type,
+                    "file_path": file_path,
+                    "timeout_seconds": timeout_seconds,
+                    "execution_backend": "none",
+                    "note": "Syntax validation only — code was NOT executed.",
+                },
+            )
 
         return ToolResult(
-            success=exit_code == 0,
-            output=stdout or "(no output)",
-            error=stderr if exit_code != 0 else None,
+            success=False,
+            output=output,
+            error="Python execution backend not implemented. "
+                  "Only syntax validation was performed — code was NOT executed.",
             metadata={
                 "source_type": source_type,
                 "file_path": file_path,
-                "exit_code": exit_code,
-                "stdout_lines": len(stdout.split("\n")) if stdout else 0,
                 "timeout_seconds": timeout_seconds,
-                "sandbox": "mock",
+                "execution_backend": "none",
+                "note": "Syntax validation passed, but no real execution occurred.",
             },
         )
-
-
-def _mock_execute(source: str) -> tuple[str, str, int]:
-    """Simulate running Python code (syntax + safety checks only)."""
-    stdout = ""
-    stderr = ""
-
-    try:
-        compile(source, "<sandbox>", "exec")
-    except SyntaxError as exc:
-        return "", f"SyntaxError: {exc.msg} (line {exc.lineno})", 1
-
-    dangerous = ["os.system", "subprocess", "shutil.rmtree", "eval(", "exec("]
-    for kw in dangerous:
-        if kw in source:
-            return "", f"SecurityError: dangerous call '{kw}' blocked by sandbox", 1
-
-    for line in source.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("import ") or stripped.startswith("from "):
-            try:
-                compile(stripped, "<sandbox>", "exec")
-            except SyntaxError:
-                stderr += f"ImportError: bad syntax in '{stripped}'\n"
-
-    if 'print(' in source or 'print(' in source.lower():
-        import re
-        prints = re.findall(r'print\s*\(\s*(.+?)\s*\)', source)
-        if prints:
-            stdout = "\n".join(f"[mock] {p}" for p in prints)
-        else:
-            stdout = "[mock] code executed successfully (no output captured)"
-    else:
-        stdout = "[mock] code executed successfully"
-
-    if stderr:
-        return stdout, stderr.strip(), 0
-
-    return stdout, "", 0
 
 
 tool_registry.register(RunPythonTool())

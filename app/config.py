@@ -57,6 +57,9 @@ class Settings:
         ),
     )
 
+    # ── Auth ─────────────────────────────────────────────────────────────
+    api_auth_token: str = field(default_factory=lambda: os.getenv("API_AUTH_TOKEN", ""))
+
     # ── Security ────────────────────────────────────────────────────────
     cors_origins: list[str] = field(
         default_factory=lambda: [

@@ -23,7 +23,6 @@ Topology (v4)::
       └── reject/modify ──► code_agent
 """
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents import (
@@ -42,8 +41,17 @@ _MAX_REVIEW_ITERATIONS = 2
 # Routing functions
 # ============================================================================
 
+def _route_after_planner(state: AgentState) -> str:
+    """If planner errored, end immediately; otherwise proceed to code_agent."""
+    if state.get("error"):
+        return END
+    return "code_agent"
+
+
 def _route_after_code_agent(state: AgentState) -> str:
-    """If there are pending tool calls, execute them; otherwise proceed to reviewer."""
+    """If code_agent errored, end immediately; otherwise route normally."""
+    if state.get("error"):
+        return END
     for tc in state.get("tool_calls", []):
         if tc.get("status") == "pending":
             return "tool_node"
@@ -51,6 +59,9 @@ def _route_after_code_agent(state: AgentState) -> str:
 
 
 def _route_after_review(state: AgentState) -> str:
+    """If reviewer errored, end immediately; otherwise route normally."""
+    if state.get("error"):
+        return END
     review = state.get("review", {})
     if review.get("passed", False):
         return "human_approval"
@@ -81,21 +92,25 @@ def build_graph() -> StateGraph:
 
     # ── Edges ──
     workflow.add_edge(START, "planner")
-    workflow.add_edge("planner", "code_agent")
+    workflow.add_conditional_edges(
+        "planner",
+        _route_after_planner,
+        {"code_agent": "code_agent", END: END},
+    )
 
-    # Code agent → tool loop OR reviewer
+    # Code agent → tool loop OR reviewer OR end (error)
     workflow.add_conditional_edges(
         "code_agent",
         _route_after_code_agent,
-        {"tool_node": "tool_node", "reviewer": "reviewer"},
+        {"tool_node": "tool_node", "reviewer": "reviewer", END: END},
     )
     workflow.add_edge("tool_node", "code_agent")       # always loop back
 
-    # Reviewer → auto-fix OR human
+    # Reviewer → auto-fix OR human OR end (error)
     workflow.add_conditional_edges(
         "reviewer",
         _route_after_review,
-        {"code_agent": "code_agent", "human_approval": "human_approval"},
+        {"code_agent": "code_agent", "human_approval": "human_approval", END: END},
     )
 
     # Human → finish OR loop back
@@ -105,4 +120,5 @@ def build_graph() -> StateGraph:
         {"code_agent": "code_agent", END: END},
     )
 
-    return workflow.compile(checkpointer=MemorySaver())
+    from app.redis_saver import RedisSaver
+    return workflow.compile(checkpointer=RedisSaver())

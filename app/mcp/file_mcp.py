@@ -115,8 +115,12 @@ class FileMCP(BaseMCP):
             return ToolResult(success=False, error=str(exc), metadata={"path": path})
 
     def _write(self, args: dict) -> ToolResult:
-        path = args["path"]
-        content = args["content"]
+        path = args.get("path")
+        content = args.get("content")
+        if not path:
+            return ToolResult(success=False, error="Missing required parameter: 'path'")
+        if content is None:
+            return ToolResult(success=False, error="Missing required parameter: 'content'")
         try:
             meta = write_file(path, content)
             existed = meta.pop("existed_before")
@@ -143,7 +147,9 @@ class FileMCP(BaseMCP):
             return ToolResult(success=False, error=str(exc))
 
     def _search(self, args: dict) -> ToolResult:
-        pattern = args["pattern"]
+        pattern = args.get("pattern")
+        if not pattern:
+            return ToolResult(success=False, error="Missing required parameter: 'pattern'")
         glob_pat = args.get("glob")
         max_results = int(args.get("max_results", 50))
         try:

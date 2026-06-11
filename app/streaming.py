@@ -92,6 +92,10 @@ def _sanitize(node_name: str, update: dict) -> dict[str, Any]:
                     "role": type(last).__name__.replace("Message", "").lower(),
                     "content": str(last.content)[:500],
                 }
+        elif key == "input":
+            clean[key] = str(value)[:500]
+        elif key == "session_id":
+            clean[key] = str(value)
         elif key == "code":
             clean[key] = str(value)[:2000]
         elif key == "tool_calls":
@@ -128,10 +132,13 @@ def _sanitize(node_name: str, update: dict) -> dict[str, Any]:
             clean[key] = str(value)[:500]
         elif key == "iteration_count":
             clean[key] = value
+        elif key == "error":
+            clean[key] = str(value)[:500]
         elif key in ("target_file", "project_root"):
             clean[key] = value
         else:
-            # Skip internal fields
+            # Skip unknown internal fields (defence-in-depth: prevents
+            # accidental exposure of internal state added in future versions)
             pass
     return clean
 
@@ -205,11 +212,20 @@ async def stream_chat(
 
                 # ── Node done ──
                 duration = (time.time() - t0) * 1000
+                sanitized = _sanitize(node_name, update)
                 yield format_sse("node_done", {
                     "node": node_name,
-                    "output": _sanitize(node_name, update),
+                    "output": sanitized,
                     "duration_ms": round(duration, 1),
                 })
+
+                # ── Error check — if a node set an error, emit it and stop ──
+                if sanitized.get("error"):
+                    yield format_sse("error", {
+                        "message": sanitized["error"],
+                        "detail": "The AI agent pipeline stopped due to an LLM error.",
+                    })
+                    return
 
     except Exception as exc:
         # LangGraph raises GraphInterrupt when interrupt() is called inside a node.
@@ -294,11 +310,20 @@ async def stream_resume(
                         })
 
                 duration = (time.time() - t0) * 1000
+                sanitized = _sanitize(node_name, update)
                 yield format_sse("node_done", {
                     "node": node_name,
-                    "output": _sanitize(node_name, update),
+                    "output": sanitized,
                     "duration_ms": round(duration, 1),
                 })
+
+                # ── Error check — if a node set an error, emit it and stop ──
+                if sanitized.get("error"):
+                    yield format_sse("error", {
+                        "message": sanitized["error"],
+                        "detail": "The AI agent pipeline stopped due to an LLM error.",
+                    })
+                    return
 
     except Exception as exc:
         if "GraphInterrupt" in type(exc).__name__ or "interrupt" in str(exc).lower():

@@ -7,6 +7,7 @@ import os
 # ── Backend API ─────────────────────────────────────────────────────────────
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 API_TIMEOUT = int(os.getenv("API_TIMEOUT", "120"))
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "")
 
 # ── Streamlit ───────────────────────────────────────────────────────────────
 PAGE_TITLE = "AI Code Assistant"
