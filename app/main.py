@@ -225,7 +225,24 @@ def _bind_project_root(project_path: str | None) -> None:
 # ============================================================================
 
 
-@app.post("/chat")
+@app.post(
+    "/chat",
+    response_model=ChatResponse | PausedResponse | ErrorResponse,
+    summary="Start AI agent pipeline",
+    description=(
+        "Send a user request to the AI agent pipeline. "
+        "The pipeline runs: **Planner → Code Agent → (optional) Tool Execution → "
+        "Reviewer → Human Approval**. "
+        "If the reviewer passes, the pipeline pauses for human confirmation; "
+        "the client must then call ``/chat/{thread_id}/resume`` to continue."
+    ),
+    responses={
+        200: {"description": "Pipeline completed or paused for human approval"},
+        401: {"description": "Missing or invalid API token"},
+        403: {"description": "Thread ownership mismatch"},
+        500: {"description": "Internal error (LLM failure, graph error, etc.)"},
+    },
+)
 async def chat(request: ChatRequest, _token: str = Depends(require_auth)) -> ChatResponse | PausedResponse | ErrorResponse:
     # If the caller provides an existing thread_id, verify ownership first.
     if request.thread_id:
@@ -294,7 +311,24 @@ async def chat(request: ChatRequest, _token: str = Depends(require_auth)) -> Cha
     )
 
 
-@app.post("/chat/{thread_id}/resume")
+@app.post(
+    "/chat/{thread_id}/resume",
+    response_model=ChatResponse | PausedResponse | ErrorResponse,
+    summary="Resume paused agent pipeline",
+    description=(
+        "Resume a paused agent pipeline with a human decision. "
+        "Valid actions: ``approved``, ``rejected``, ``modify``. "
+        "If ``modify``, provide ``feedback`` to guide the rework."
+    ),
+    responses={
+        200: {"description": "Pipeline completed or paused again"},
+        400: {"description": "Thread is not paused"},
+        404: {"description": "Thread not found"},
+        401: {"description": "Missing or invalid API token"},
+        403: {"description": "Thread ownership mismatch"},
+        500: {"description": "Internal error"},
+    },
+)
 async def resume(thread_id: str, body: ResumeRequest, _token: str = Depends(require_auth)) -> ChatResponse | PausedResponse | ErrorResponse:
     await _verify_thread_ownership(thread_id, _token)
     config = {"configurable": {"thread_id": thread_id}}

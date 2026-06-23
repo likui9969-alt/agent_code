@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -24,6 +25,65 @@ from frontend.utils.session import add_message
 store = get_history_store()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ChatStateManager — 集中管理聊天页所有 session_state 读写
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ChatStateManager:
+    """Centralised wrapper around Streamlit ``session_state`` for the chat page.
+
+    All chat-page state reads/writes go through this class so the surface
+    area of ``st.session_state`` keys is documented and discoverable.
+    """
+
+    # ── Keys ────────────────────────────────────────────────────────────
+    _KEYS = (
+        "active_chat_id", "messages", "current_code", "thread_id",
+        "review", "paused", "agent_steps", "tool_results",
+        "target_file", "review_decision_mode", "streaming",
+        "open_files", "active_file", "file_modified", "editor_version",
+        "page", "api_base_url",
+    )
+
+    def __getattr__(self, key: str) -> Any:
+        if key in self._KEYS:
+            return st.session_state.get(key)
+        raise AttributeError(f"Unknown key: {key!r}")
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        if key.startswith("_"):
+            super().__setattr__(key, value)
+        elif key in self._KEYS:
+            st.session_state[key] = value
+        else:
+            raise AttributeError(f"Unknown key: {key!r}")
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return st.session_state.get(key, default)
+
+    def setdefault(self, key: str, default: Any) -> Any:
+        return st.session_state.setdefault(key, default)
+
+    def reset_chat(self) -> None:
+        """Clear all chat-specific state for a new chat."""
+        self.messages = []
+        self.current_code = ""
+        self.thread_id = ""
+        self.agent_steps = []
+        self.review = None
+        self.paused = False
+        self.tool_results = []
+        self.target_file = ""
+        self.review_decision_mode = None
+        self.editor_version = {}
+        self.open_files = {}
+        self.file_modified = {}
+        self.streaming = False
+
+
+_state = ChatStateManager()
+
+
 def _api() -> APIClient:
     return APIClient(st.session_state.get("api_base_url", API_BASE_URL))
 
@@ -32,49 +92,54 @@ def render_chat() -> None:
     st.title("🧠 AI 代码助手")
     st.caption("规划 → 编码 → 工具 → 审查 → 人工确认")
 
-    # ── 管道 ──
-    with st.expander("🔧 执行管道", expanded=True):
+    paused = _state.paused
+    review = _state.review
+    code = _state.current_code or ""
+
+    # ── 执行管道（紧凑状态条）──
+    with st.container(border=True):
         render_agent_pipeline()
 
-    # ── 审批 ──
-    if st.session_state.get("paused") and st.session_state.get("review"):
-        show_paused_banner(st.session_state.get("thread_id", ""))
-        render_review_panel(st.session_state.get("review", {}), on_decision=_handle_decision)
+    # ── 审批面板（需要时全宽突出显示）──
+    if paused and review:
+        show_paused_banner(_state.thread_id or "")
+        render_review_panel(review, on_decision=_handle_decision)
 
-    # ── 编辑器 (有文件时自动展开) ──
-    has_files = bool(st.session_state.get("open_files"))
-    with st.expander("📝 编辑器", expanded=has_files):
-        render_editor_tabs()
+    # ── 主工作区：左侧对话 / 右侧代码与上下文 ──
+    chat_col, context_col = st.columns([3, 2])
 
-    # ── 生成代码 ──
-    code = st.session_state.get("current_code", "")
-    if code:
-        st.divider()
-        st.subheader("💻 生成代码")
-        render_code_block(code)
-        render_apply_code_panel(code)
+    with chat_col:
+        st.subheader("� 对话")
+        render_messages()
 
-    # ── Plan ──
-    for step in st.session_state.get("agent_steps", []):
-        if step["agent"] == "planner" and step.get("output"):
-            render_plan(step["output"])
-            break
+        if paused:
+            st.info("⏸️ 请先审核右侧的代码审查结果")
+        else:
+            render_chat_input(on_send=_handle_send)
 
-    # ── 工具结果 ──
-    tr = st.session_state.get("tool_results", [])
-    if tr:
-        render_tool_results(tr)
+    with context_col:
+        # 生成代码 + 应用到项目
+        if code:
+            with st.container(border=True):
+                st.markdown("**💻 生成代码**")
+                render_code_block(code)
+                render_apply_code_panel(code)
 
-    # ── 对话 ──
-    st.divider()
-    st.subheader("💬 对话")
-    render_messages()
+        # 文件编辑器（有文件时展开）
+        if _state.open_files:
+            with st.expander("📝 编辑器", expanded=True):
+                render_editor_tabs()
 
-    # ── 输入 ──
-    if st.session_state.get("paused"):
-        st.info("⏸️ 请先审核上面的代码审查结果")
-    else:
-        render_chat_input(on_send=_handle_send)
+        # Plan
+        for step in _state.agent_steps or []:
+            if step["agent"] == "planner" and step.get("output"):
+                render_plan(step["output"])
+                break
+
+        # 工具结果
+        tr = _state.tool_results or []
+        if tr:
+            render_tool_results(tr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

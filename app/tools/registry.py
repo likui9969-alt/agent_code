@@ -77,6 +77,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         project_root: str | None = None,
+        session_id: str = "",
     ) -> ToolResult:
         """Execute a tool by name, log the call, return the result.
 
@@ -106,6 +107,9 @@ class ToolRegistry:
             arguments=arguments,
             result=result,
             duration_ms=result.metadata.get("duration_ms", 0),
+            session_id=session_id,
+            project_root=project_root or "",
+            error_stack=result.error if not result.success else None,
         )
         self._execution_log.append(log_entry)
 

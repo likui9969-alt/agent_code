@@ -9,10 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from frontend.config import PAGE_TITLE, PAGE_ICON, LAYOUT
+from frontend.config import PAGE_TITLE, PAGE_ICON, LAYOUT, THEME
 from frontend.i18n import t
 from frontend.utils.session import init_session
 from frontend.services.history_store import get_history_store
+from frontend.services.settings_store import get_settings_store
 from frontend.components.project_explorer import render_project_explorer
 from frontend.components.chat_history import render_chat_history
 from frontend.pages.home import render_home
@@ -22,6 +23,126 @@ from frontend.pages.settings import render_settings
 # ── 必须第一个 Streamlit 命令 ──
 st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout=LAYOUT)
 init_session()
+
+
+def _inject_global_styles() -> None:
+    """Inject a minimal design-system CSS to unify the Streamlit UI."""
+    is_dark = st.session_state.get("theme_idx", 0) == 1
+    if is_dark:
+        bg = "#0F172A"           # slate-900
+        fg = "#F8FAFC"           # slate-50
+        muted = "#94A3B8"        # slate-400
+        card = "#1E293B"         # slate-800
+        border = "#334155"       # slate-700
+    else:
+        bg = "#FFFFFF"
+        fg = THEME["text"]
+        muted = THEME["text_muted"]
+        card = THEME["bg_card"]
+        border = THEME["border"]
+
+    css = f"""
+    <style>
+    /* ── Base ── */
+    .stApp {{
+        background-color: {bg};
+    }}
+    .block-container {{
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+    }}
+    h1, h2, h3, h4, h5, h6 {{
+        color: {fg} !important;
+        font-weight: 600;
+    }}
+    p, div, span, label {{
+        color: {fg};
+    }}
+    .stCaption {{
+        color: {muted};
+    }}
+
+    /* ── Cards / Containers ── */
+    .stAlert, div[data-testid="stExpander"], div[data-testid="stVerticalBlockBorderWrapper"] > div {{
+        border-radius: {THEME["radius"]};
+        border: 1px solid {border};
+        background-color: {card};
+    }}
+
+    /* ── Buttons ── */
+    div.stButton > button:first-child {{
+        border-radius: {THEME["radius"]};
+        font-weight: 500;
+        transition: all 0.15s ease;
+    }}
+    div.stButton > button:first-child:hover {{
+        transform: translateY(-1px);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    }}
+    div.stButton > button[kind="primary"] {{
+        background-color: {THEME["primary"]};
+        border-color: {THEME["primary"]};
+        color: #fff;
+    }}
+    div.stButton > button[kind="primary"]:hover {{
+        background-color: {THEME["primary_hover"]};
+        border-color: {THEME["primary_hover"]};
+    }}
+    div.stButton > button[kind="secondary"] {{
+        background-color: {card};
+        border-color: {border};
+        color: {fg};
+    }}
+
+    /* ── Chat input ── */
+    div[data-testid="stChatInput"] > div {{
+        border-radius: {THEME["radius"]};
+        border: 1px solid {border};
+        background-color: {card};
+    }}
+
+    /* ── Sidebar tidy ── */
+    section[data-testid="stSidebar"] .block-container {{
+        padding-top: 1rem;
+        background-color: {card};
+    }}
+    section[data-testid="stSidebar"] hr {{
+        margin: 0.75rem 0;
+        border-color: {border};
+    }}
+
+    /* ── Code blocks ── */
+    div[data-testid="stCodeBlock"] pre {{
+        border-radius: {THEME["radius"]};
+        border: 1px solid {border};
+    }}
+
+    /* ── Metric cards ── */
+    div[data-testid="stMetric"] {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: {THEME["radius"]};
+        padding: 0.5rem;
+    }}
+    div[data-testid="stMetric"] label {{
+        color: {muted};
+    }}
+
+    /* ── Inputs ── */
+    div[data-testid="stTextInput"] > div, div[data-testid="stTextArea"] > div {{
+        border-radius: {THEME["radius"]};
+        border-color: {border};
+        background-color: {card};
+    }}
+    div[data-testid="stTextInput"] input, div[data-testid="stTextArea"] textarea {{
+        color: {fg};
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
+
+
+_inject_global_styles()
 
 # ── 路由默认值 ──
 if "page" not in st.session_state:

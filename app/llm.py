@@ -36,11 +36,27 @@ def _sanitize_error(msg: str) -> str:
 
 
 class LLMError(Exception):
-    """Raised when the LLM is not configured or the API call fails."""
+    """Raised when the LLM is not configured or the API call fails.
 
-    def __init__(self, message: str, detail: str = "") -> None:
+    Attributes:
+        error_type: Categorises the failure for programmatic handling.
+            - ``"not_configured"`` — API key missing.
+            - ``"api_error"`` — upstream returned an error (4xx/5xx).
+            - ``"timeout"`` — request exceeded the configured timeout.
+            - ``"empty_response"`` — API returned no content.
+            - ``"rate_limit"`` — upstream rate limit exceeded.
+            - ``"exhausted"`` — all retries failed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        detail: str = "",
+        error_type: str = "unknown",
+    ) -> None:
         super().__init__(message)
         self.detail = detail
+        self.error_type = error_type
 
 
 # ── Lazy client (created on first call) ─────────────────────────────────────
@@ -89,8 +105,8 @@ def chat(
 ) -> str:
     """Send a prompt to Qwen and return the reply.
 
-    Retries up to 4 times with exponential backoff (0s, 1s, 2s, 4s)
-    on transient API failures.
+    Retries with exponential backoff on transient API failures.
+    Retry count and timeout are configurable via settings.
 
     Raises:
         LLMError: If the LLM is not configured or all retries are exhausted.
@@ -100,9 +116,11 @@ def chat(
         raise LLMError(
             "LLM not configured",
             "Please set QWEN_API_KEY in .env or via the /settings/llm endpoint.",
+            error_type="not_configured",
         )
 
-    _BACKOFF = [0, 1, 2, 4]  # seconds between retries (4 attempts total)
+    retries = max(settings.llm_retry_attempts, 1)
+    _BACKOFF = [0] + [2 ** (i - 1) for i in range(1, retries)]  # e.g. 0, 1, 2, 4
     last_error: Exception | None = None
 
     for attempt, delay in enumerate(_BACKOFF):
@@ -123,14 +141,25 @@ def chat(
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                timeout=float(settings.llm_request_timeout),
             )
         except Exception as exc:
             elapsed = (time.perf_counter() - t0) * 1000
+            exc_str = _sanitize_error(str(exc))
             logger.warning(
                 "LLM attempt=%d/%d elapsed=%.0fms error=%s",
-                attempt + 1, len(_BACKOFF), elapsed, _sanitize_error(str(exc)),
+                attempt + 1, len(_BACKOFF), elapsed, exc_str,
             )
             last_error = exc
+            # Classify the error for the caller
+            error_type = _classify_error(exc)
+            # Don't retry on auth errors or bad requests
+            if error_type in ("not_configured",):
+                raise LLMError(
+                    "LLM API error",
+                    exc_str,
+                    error_type=error_type,
+                ) from exc
             continue
 
         elapsed = (time.perf_counter() - t0) * 1000
@@ -143,6 +172,7 @@ def chat(
             last_error = LLMError(
                 "Qwen API returned empty response",
                 "The model returned no content. Try again or switch models.",
+                error_type="empty_response",
             )
             continue
 
@@ -155,7 +185,23 @@ def chat(
     raise LLMError(
         "Qwen API unavailable",
         f"All {len(_BACKOFF)} attempts failed. Last error: {_sanitize_error(str(last_error))}",
+        error_type="exhausted",
     ) from last_error
+
+
+def _classify_error(exc: Exception) -> str:
+    """Classify an OpenAI API exception into a known error type."""
+    exc_str = str(exc).lower()
+    cls_name = type(exc).__name__.lower()
+    if "timeout" in cls_name or "timeout" in exc_str:
+        return "timeout"
+    if "rate" in exc_str and ("limit" in exc_str or "429" in exc_str):
+        return "rate_limit"
+    if "401" in exc_str or "unauthorized" in exc_str or "auth" in exc_str:
+        return "not_configured"
+    if "400" in exc_str or "invalid" in exc_str:
+        return "api_error"
+    return "api_error"
 
 
 def is_available() -> bool:

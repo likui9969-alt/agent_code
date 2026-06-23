@@ -28,3 +28,16 @@ docker-compose.override.yml
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code 本地设置
+.claude/
+
+# MCP 工具配置
+.mcp.json
+
+# AI 生成输出文件（不影响代码）
+output.py
+
+# Runtime data
+data/chat_history.json
+data/user_settings.json

@@ -58,10 +58,21 @@ class ToolExecutionLog:
     result: dict  # ToolResult.to_dict()
     duration_ms: float
     timestamp: float
+    session_id: str = ""
+    project_root: str = ""
+    error_stack: str | None = None
 
     @classmethod
     def from_execution(
-        cls, tool_name: str, arguments: dict, result: ToolResult, duration_ms: float
+        cls,
+        tool_name: str,
+        arguments: dict,
+        result: ToolResult,
+        duration_ms: float,
+        *,
+        session_id: str = "",
+        project_root: str = "",
+        error_stack: str | None = None,
     ) -> "ToolExecutionLog":
         return cls(
             id=str(uuid.uuid4())[:8],
@@ -70,10 +81,13 @@ class ToolExecutionLog:
             result=result.to_dict(),
             duration_ms=duration_ms,
             timestamp=time.time(),
+            session_id=session_id,
+            project_root=project_root,
+            error_stack=error_stack,
         )
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "id": self.id,
             "tool_name": self.tool_name,
             "arguments": self.arguments,
@@ -81,6 +95,13 @@ class ToolExecutionLog:
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp,
         }
+        if self.session_id:
+            d["session_id"] = self.session_id
+        if self.project_root:
+            d["project_root"] = self.project_root
+        if self.error_stack:
+            d["error_stack"] = self.error_stack
+        return d
 
 
 # ============================================================================

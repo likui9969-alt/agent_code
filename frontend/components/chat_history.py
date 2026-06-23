@@ -32,24 +32,35 @@ def render_chat_history(on_select, on_new, on_delete, on_rename) -> None:
 
     for chat in chats[:30]:
         cid = chat["id"]
-        title = chat.get("title", "新建对话")[:30]
+        title = chat.get("title", "新建对话")[:26]
         active = cid == st.session_state.get("active_chat_id")
 
-        c1, c2, c3 = st.columns([6, 1, 1])
-        with c1:
-            prefix = "▸ " if active else "  "
-            t = "primary" if active else "secondary"
-            if st.button(f"{prefix}{title}", key=f"h_{cid}", use_container_width=True, type=t):
-                on_select(cid)
-                st.rerun()
-        with c2:
-            if st.button("✎", key=f"rn_{cid}", help="重命名"):
-                st.session_state["_rename_id"] = cid
-                st.rerun()
-        with c3:
-            if st.button("✕", key=f"dl_{cid}", help="删除"):
-                on_delete(cid)
-                st.rerun()
+        # Compact history item with inline actions
+        container = st.container(border=active)
+        with container:
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                label = f"▸ {title}" if active else f"  {title}"
+                btn_type = "primary" if active else "secondary"
+                if st.button(
+                    label,
+                    key=f"h_{cid}",
+                    use_container_width=True,
+                    type=btn_type,
+                    help=title,
+                ):
+                    on_select(cid)
+                    st.rerun()
+            with c2:
+                a1, a2 = st.columns(2)
+                with a1:
+                    if st.button("✎", key=f"rn_{cid}", help="重命名", use_container_width=True):
+                        st.session_state["_rename_id"] = cid
+                        st.rerun()
+                with a2:
+                    if st.button("✕", key=f"dl_{cid}", help="删除", use_container_width=True):
+                        on_delete(cid)
+                        st.rerun()
 
     # ── 重命名 ──
     rid = st.session_state.get("_rename_id")

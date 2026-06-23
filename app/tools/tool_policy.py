@@ -22,6 +22,7 @@ run by a human.  The goal is to raise the cost of successful attacks.
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
@@ -58,7 +59,71 @@ _DANGEROUS_CODE_PATTERNS: list[tuple[str, str]] = [
     (r"\b__builtins__\b", "__builtins__ access — sandbox escape"),
     (r"\bimportlib\.import_module\s*\(", "importlib.import_module() — dynamic import"),  # noqa: E501
     (r"\bbuiltins\.\w+\s*\[", "builtins subscript access — sandbox escape"),
+    # ── Network access ──
+    (r"\brequests\.(get|post|put|delete|patch|head)\s*\(", "requests HTTP — network access"),  # noqa: E501
+    (r"\burllib\.request\.", "urllib.request — network access"),
+    (r"\bsocket\.(connect|send|recv)\s*\(", "socket — network access"),
+    (r"\bhttp\.client\.", "http.client — network access"),
+    (r"\baiohttp\.", "aiohttp — async network access"),
+    (r"\bhttpx\.(get|post|put|delete|patch)\s*\(", "httpx — network access"),  # noqa: E501
+    # ── File system escape ──
+    (r"\bos\.(remove|unlink|rmdir|chmod|chown|link|symlink)\s*\(", "os destructive ops — filesystem escape"),  # noqa: E501
+    (r"\bshutil\.(rmtree|copy|copytree|move)\s*\(", "shutil — filesystem escape"),  # noqa: E501
+    (r"\bpathlib\.Path\.(unlink|rmdir|chmod|symlink_to)\s*\(", "pathlib destructive — filesystem escape"),  # noqa: E501
 ]
+
+# ── AST analysis blocklist ──────────────────────────────────────────────────
+
+# Function / attribute names whose call is always considered dangerous.
+_DANGEROUS_CALLS: frozenset[str] = frozenset({
+    # arbitrary execution
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+    # shell / process
+    "system",
+    "popen",
+    "spawn",
+    "execv",
+    "execve",
+    # file system destructors
+    "remove",
+    "unlink",
+    "rmdir",
+    "chmod",
+    "chown",
+    "link",
+    "symlink",
+    "rmtree",
+    # network
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+    "head",
+    "connect",
+    "send",
+    "recv",
+})
+
+# Modules whose import is banned entirely.
+_DANGEROUS_MODULES: frozenset[str] = frozenset({
+    "subprocess",
+    "os",
+    "socket",
+    "requests",
+    "urllib",
+    "urllib.request",
+    "http.client",
+    "httpx",
+    "aiohttp",
+    "ctypes",
+    "importlib",
+    "shutil",
+    "pathlib",
+})
 
 # ============================================================================
 # Size limits
@@ -118,6 +183,10 @@ def _check_run_python(args: dict[str, Any]) -> None:
         _check_sensitive_path(file_path)
     if code:
         _check_dangerous_code(code)
+    if not code and not file_path:
+        raise ToolPolicyViolation(
+            "run_python requires either 'code' or 'file_path'"
+        )
 
 
 def _check_read_file(args: dict[str, Any]) -> None:
@@ -158,9 +227,102 @@ def _check_file_size(content: str, path: str) -> None:
 
 
 def _check_dangerous_code(code: str) -> None:
-    """Scan *code* for dangerous Python constructs."""
+    """Scan *code* for dangerous Python constructs.
+
+    Uses two layers:
+      1. Fast regex pass for obvious patterns.
+      2. AST analysis to catch obfuscated / dynamic attacks.
+    """
+    # Layer 1: fast regex pass (kept for speed and backward compatibility).
     for pattern, description in _DANGEROUS_CODE_PATTERNS:
         if re.search(pattern, code, re.IGNORECASE):
             raise ToolPolicyViolation(
                 f"Dangerous code pattern blocked: {description}"
             )
+
+    # Layer 2: AST static analysis (catches getattr(__builtins__, ...),
+    # string concatenation, indirect imports, etc.).
+    _check_dangerous_code_ast(code)
+
+
+def _check_dangerous_code_ast(code: str) -> None:
+    """Parse *code* with :mod:`ast` and reject dangerous constructs.
+
+    Blocks:
+      - imports of dangerous modules
+      - calls to dangerous functions / attributes
+      - getattr / __import__ trickery
+      - arbitrary object calls via expressions that resolve to dangerous names
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        # Syntax errors are already caught by the run_python compile step,
+        # but we treat them as a policy block here to avoid leaking partial
+        # execution paths.
+        raise ToolPolicyViolation(
+            f"Code parsing failed — syntax error at line {exc.lineno}"
+        ) from exc
+
+    for node in ast.walk(tree):
+        # ── Imports ──
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name.split(".")[0]
+                if name in _DANGEROUS_MODULES:
+                    raise ToolPolicyViolation(
+                        f"Dangerous import blocked: {alias.name}"
+                    )
+
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".")[0]
+            if root in _DANGEROUS_MODULES or module in _DANGEROUS_MODULES:
+                raise ToolPolicyViolation(
+                    f"Dangerous import-from blocked: {module}"
+                )
+
+        # ── Direct dangerous calls ──
+        elif isinstance(node, ast.Call):
+            func_name = _ast_name(node.func)
+            if func_name in _DANGEROUS_CALLS:
+                raise ToolPolicyViolation(
+                    f"Dangerous call blocked: {func_name}()"
+                )
+
+            # getattr(__builtins__, "eval") / __import__("os")
+            if isinstance(node.func, ast.Name) and node.func.id == "getattr":
+                # Heuristic: any getattr on builtins-like names is suspicious.
+                if len(node.args) >= 2:
+                    first = node.args[0]
+                    if isinstance(first, ast.Name) and first.id in ("__builtins__", "builtins"):
+                        raise ToolPolicyViolation(
+                            "getattr on builtins blocked — sandbox escape"
+                        )
+
+        # ── Expressions used to smuggle dangerous names ──
+        elif isinstance(node, ast.Name):
+            if node.id == "__builtins__":
+                raise ToolPolicyViolation(
+                    "Direct __builtins__ access blocked"
+                )
+
+
+def _ast_name(node: ast.AST) -> str:
+    """Return the dotted name of an AST expression, or ''."""
+    parts: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    elif isinstance(current, ast.Subscript):
+        # builtins['eval']  →  only flag builtins base
+        sub = current.value
+        while isinstance(sub, ast.Attribute):
+            parts.append(sub.attr)
+            sub = sub.value
+        if isinstance(sub, ast.Name):
+            parts.append(sub.id)
+    return ".".join(reversed(parts))

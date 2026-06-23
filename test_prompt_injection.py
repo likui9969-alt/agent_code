@@ -185,6 +185,215 @@ class TestCodePathAlternatives:
 
 
 # ============================================================================
+# Test 5 — Config validation
+# ============================================================================
+
+
+class TestConfigValidation:
+    """Verify that config validation detects common misconfigurations."""
+
+    def test_validate_detects_missing_api_key(self):
+        from app.config import Settings
+        s = Settings()
+        s.qwen_api_key = ""
+        warnings = s.validate()
+        assert any("QWEN_API_KEY" in w for w in warnings)
+
+    def test_validate_negative_rate_limit_gets_clamped(self):
+        from app.config import Settings
+        s = Settings()
+        s.rate_limit_requests = -1
+        s.validate()
+        assert s.rate_limit_requests >= 1
+
+    def test_reload_preserves_fields(self):
+        from app.config import Settings
+        s = Settings()
+        old_port = s.app_port
+        s.reload()
+        assert s.app_port == old_port
+
+
+# ============================================================================
+# Test 6 — Tool Registry
+# ============================================================================
+
+
+class TestToolRegistry:
+    """Verify ToolRegistry operations."""
+
+    def test_register_and_get(self):
+        from app.tools.registry import ToolRegistry
+        from app.tools.file_tools import ReadFileTool
+        r = ToolRegistry()
+        t = ReadFileTool()
+        r.register(t)
+        assert r.get("read_file") is t
+
+    def test_list_tools(self):
+        from app.tools.registry import ToolRegistry
+        from app.tools.file_tools import ReadFileTool
+        r = ToolRegistry()
+        r.register(ReadFileTool())
+        assert "read_file" in r.list_tools()
+
+    def test_unregister(self):
+        from app.tools.registry import ToolRegistry
+        from app.tools.file_tools import ReadFileTool
+        r = ToolRegistry()
+        r.register(ReadFileTool())
+        assert r.unregister("read_file") is True
+        assert r.get("read_file") is None
+
+    def test_execute_unknown_tool(self):
+        from app.tools.registry import ToolRegistry
+        r = ToolRegistry()
+        result = r.execute("nonexistent", {})
+        assert result.success is False
+        assert "Unknown tool" in result.error
+
+
+# ============================================================================
+# Test 7 — Extended tool policy (network / filesystem escape)
+# ============================================================================
+
+
+class TestExtendedToolPolicy:
+    """Verify the new network and filesystem escape patterns."""
+
+    def test_blocks_network_requests(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        with pytest.raises(ToolPolicyViolation, match="network"):
+            check_tool_policy("run_python", {"code": "import requests; requests.get('http://evil.com')"})
+
+    def test_blocks_socket_connect(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        with pytest.raises(ToolPolicyViolation, match="network"):
+            check_tool_policy("run_python", {"code": "import socket; socket.connect(('h', 80))"})
+
+    def test_blocks_os_remove(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        with pytest.raises(ToolPolicyViolation, match="filesystem"):
+            check_tool_policy("run_python", {"code": "import os; os.remove('/tmp/x')"})
+
+    def test_blocks_shutil_rmtree(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        with pytest.raises(ToolPolicyViolation, match="filesystem"):
+            check_tool_policy("run_python", {"code": "import shutil; shutil.rmtree('/tmp')"})
+
+    def test_run_python_missing_args(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        with pytest.raises(ToolPolicyViolation, match="requires"):
+            check_tool_policy("run_python", {})
+
+
+# ============================================================================
+# Test 9 — Subprocess output limits
+# ============================================================================
+
+
+class TestOutputLimits:
+    """Verify RunPythonTool caps captured stdout/stderr size."""
+
+    def test_huge_stdout_is_truncated(self):
+        from app.tools.execution_tools import _execute_sandbox
+        source = "print('A' * 200_000)"
+        stdout, stderr, code = _execute_sandbox(source, timeout=10)
+        assert code == 0
+        assert "truncated" in stdout
+        assert len(stdout.encode("utf-8")) <= 70 * 1024
+
+    def test_huge_stderr_is_truncated(self):
+        from app.tools.execution_tools import _execute_sandbox
+        source = "import sys\nsys.stderr.write('E' * 200_000)"
+        stdout, stderr, code = _execute_sandbox(source, timeout=10)
+        assert code == 0
+        assert "truncated" in stderr
+        assert len(stderr.encode("utf-8")) <= 70 * 1024
+
+    def test_small_output_not_truncated(self):
+        from app.tools.execution_tools import _execute_sandbox
+        source = "print('hello')"
+        stdout, stderr, code = _execute_sandbox(source, timeout=10)
+        assert code == 0
+        assert "truncated" not in stdout
+        assert "hello" in stdout
+
+
+# ============================================================================
+# Test 9 — AST-based code analysis
+# ============================================================================
+
+
+class TestASTPolicy:
+    """Verify AST static analysis catches obfuscated attacks."""
+
+    def test_blocks_getattr_builtins_eval(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        code = 'getattr(__builtins__, "eval")("1+1")'
+        with pytest.raises(ToolPolicyViolation, match="getattr on builtins"):
+            check_tool_policy("run_python", {"code": code})
+
+    def test_blocks_indirect_import(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        code = "import subprocess\nsubprocess.run('ls')"
+        with pytest.raises(ToolPolicyViolation, match="Dangerous import"):
+            check_tool_policy("run_python", {"code": code})
+
+    def test_blocks_import_from_urllib(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        code = "from urllib.request import urlopen\nurlopen('http://x.com')"
+        with pytest.raises(ToolPolicyViolation, match="Dangerous import"):
+            check_tool_policy("run_python", {"code": code})
+
+    def test_blocks_os_import(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        code = "import os\nos.system('id')"
+        with pytest.raises(ToolPolicyViolation, match="Dangerous import"):
+            check_tool_policy("run_python", {"code": code})
+
+    def test_blocks_eval_via_string_concat(self):
+        from app.tools.tool_policy import ToolPolicyViolation, check_tool_policy
+        code = 'f = "ev" + "al"\n__builtins__.__dict__[f]("1+1")'
+        with pytest.raises(ToolPolicyViolation, match="Direct __builtins__"):
+            check_tool_policy("run_python", {"code": code})
+
+    def test_allows_safe_math_code(self):
+        from app.tools.tool_policy import check_tool_policy
+        code = "import math\nprint(math.sqrt(16))"
+        check_tool_policy("run_python", {"code": code})
+
+    def test_allows_safe_builtin_functions(self):
+        from app.tools.tool_policy import check_tool_policy
+        code = "print(sum([1, 2, 3]))"
+        check_tool_policy("run_python", {"code": code})
+
+
+# ============================================================================
+# Test 8 — LLM error classification
+# ============================================================================
+
+
+class TestLLMErrorClassification:
+    """Verify LLMError is created with proper error_type."""
+
+    def test_not_configured_error(self):
+        from app.llm import LLMError
+        e = LLMError("msg", "detail", error_type="not_configured")
+        assert e.error_type == "not_configured"
+
+    def test_timeout_error(self):
+        from app.llm import LLMError
+        e = LLMError("msg", "detail", error_type="timeout")
+        assert e.error_type == "timeout"
+
+    def test_exhausted_error(self):
+        from app.llm import LLMError
+        e = LLMError("msg", "detail", error_type="exhausted")
+        assert e.error_type == "exhausted"
+
+
+# ============================================================================
 # Runner
 # ============================================================================
 

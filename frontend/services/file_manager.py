@@ -56,31 +56,53 @@ class FileManager:
         return self._scan_dir(self.root_path)
 
     def _scan_dir(self, directory: Path, depth: int = 0) -> dict:
-        children = []
+        """Return a tree dict for *directory*.
+
+        Only the immediate level is expanded; nested directories are returned
+        as stubs so the UI can lazy-load them on demand.
+        """
+        rel_path = str(directory.relative_to(self.root_path)) if directory != self.root_path else "."
+        node = {"name": directory.name, "type": "directory", "path": rel_path, "children": []}
+
         try:
             entries = sorted(directory.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
         except PermissionError:
-            return {"name": directory.name, "type": "directory", "children": []}
+            return node
 
         for entry in entries:
             if _should_ignore(entry.name):
                 continue
+            child_rel = str(entry.relative_to(self.root_path))
             if entry.is_dir():
-                if depth < 3:  # limit recursion
-                    children.append(self._scan_dir(entry, depth + 1))
+                # Only expand the top-level directory. Nested directories are
+                # returned as stubs and lazy-loaded by the UI on expansion.
+                if depth == 0:
+                    node["children"].append(self._scan_dir(entry, depth + 1))
+                else:
+                    node["children"].append({
+                        "name": entry.name,
+                        "type": "directory",
+                        "path": child_rel,
+                        "children": [],
+                    })
             else:
-                children.append({
+                node["children"].append({
                     "name": entry.name,
                     "type": "file",
-                    "path": str(entry.relative_to(self.root_path)),
+                    "path": child_rel,
                     "size": entry.stat().st_size,
                 })
-        return {
-            "name": directory.name,
-            "type": "directory",
-            "path": str(directory.relative_to(self.root_path)) if directory != self.root_path else ".",
-            "children": children,
-        }
+        return node
+
+    def scan_subdir(self, relative_path: str) -> dict:
+        """Lazy-load children of a subdirectory given by *relative_path*."""
+        if not self.root_path:
+            return {"name": "", "type": "directory", "children": []}
+        target = self._resolve(relative_path)
+        if not target.is_dir():
+            return {"name": target.name, "type": "directory", "children": []}
+        node = self._scan_dir(target, depth=1)
+        return node
 
     # ── Read / Write ────────────────────────────────────────────────────
 

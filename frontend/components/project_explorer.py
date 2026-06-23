@@ -1,4 +1,4 @@
-"""Cursor 风格项目浏览器 — 真正的目录树 + 展开折叠 + 文件操作。"""
+"""项目浏览器 — Cursor 风格文件树 + 新建/删除/刷新 + 最近项目。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,11 @@ from pathlib import Path
 import streamlit as st
 
 from frontend.services.file_manager import get_file_manager
+from frontend.services.settings_store import get_settings_store
+
+
+# Maximum entries rendered per directory node to keep the UI responsive.
+_MAX_CHILDREN_PER_NODE = 100
 
 
 def render_project_explorer() -> None:
@@ -25,9 +30,23 @@ def render_project_explorer() -> None:
     with c2:
         if st.button("📂", help="打开项目", key="btn_open_proj", use_container_width=True):
             if path and os.path.isdir(path):
-                fm.open_project(path)
-                st.session_state["project_path"] = str(Path(path).resolve())
-                st.rerun()
+                _open_project(path)
+
+    # ── 最近项目快捷入口 ──
+    recents = st.session_state.get("recent_projects", [])
+    if recents:
+        with st.expander("最近项目", expanded=False):
+            for rp in recents[:5]:
+                name = os.path.basename(rp)
+                c1, c2 = st.columns([4, 1])
+                with c1:
+                    if st.button(f"📁 {name}", key=f"recent_{rp}", use_container_width=True):
+                        _open_project(rp)
+                with c2:
+                    if st.button("✕", key=f"del_recent_{rp}", use_container_width=True, help="从历史移除"):
+                        get_settings_store().remove_recent_project(rp)
+                        st.session_state["recent_projects"] = get_settings_store().get("recent_projects", [])
+                        st.rerun()
 
     if not fm.is_open():
         st.caption("点击 📂 打开项目文件夹")
@@ -64,41 +83,85 @@ def render_project_explorer() -> None:
 
     # ── 文件树 ──
     tree = fm.scan()
-    _render_node(tree, fm, "")
+    _render_tree_node(tree, fm)
 
 
-def _render_node(node: dict, fm, prefix: str) -> None:
-    """递归渲染树节点 — 文件夹可折叠，文件可点击打开/删除。"""
+def _open_project(path: str) -> None:
+    """Open project, persist recent, and rerun."""
+    from frontend.services.file_manager import get_file_manager
+    try:
+        resolved = str(Path(path).resolve())
+        get_file_manager().open_project(path)
+        st.session_state["project_path"] = resolved
+        get_settings_store().add_recent_project(resolved)
+        st.session_state["recent_projects"] = get_settings_store().get("recent_projects", [])
+        st.success(f"已打开: {os.path.basename(path)}")
+        st.rerun()
+    except Exception as e:
+        st.error(str(e))
+
+
+def _sort_nodes(children: list[dict]) -> list[dict]:
+    """Directories first, then files, both sorted by name."""
+    dirs = [c for c in children if c.get("type") == "directory"]
+    files = [c for c in children if c.get("type") == "file"]
+    return sorted(dirs, key=lambda c: c.get("name", "").lower()) + \
+           sorted(files, key=lambda c: c.get("name", "").lower())
+
+
+def _indent(level: int) -> str:
+    """Return a Unicode non-breaking-space indent string."""
+    return "\u00A0" * (level * 3)
+
+
+def _render_tree_node(node: dict, fm, level: int = 0) -> None:
+    """Render a single tree node using native Streamlit expanders for folders."""
     name = node.get("name", "")
     is_dir = node.get("type") == "directory"
     children = node.get("children", [])
     node_path = node.get("path", name)
 
-    if is_dir:
-        key = f"tree_dir_{node_path}"
-        expanded = st.session_state.get(key, False)
-        icon = "📂" if expanded else "📁"
-        label = f"{prefix}{icon} {name}"
-        if st.button(label, key=f"btn_{node_path}", use_container_width=True):
-            st.session_state[key] = not expanded
+    if not is_dir:
+        _render_file_row(name, node_path, fm, level)
+        return
+
+    # Root directory is rendered flat (no expander wrapper).
+    if node_path == "." or node_path == "":
+        for child in _sort_nodes(children):
+            _render_tree_node(child, fm, level)
+        return
+
+    # Folder: use a native expander. Its open/closed state is managed by Streamlit.
+    # Children are loaded lazily only when the expander is open.
+    expander_label = f"{_indent(level)}📁 {name}"
+    with st.expander(expander_label, expanded=False):
+        sub = fm.scan_subdir(node_path)
+        sub_children = sub.get("children", [])
+        if len(sub_children) > _MAX_CHILDREN_PER_NODE:
+            st.caption(f"目录条目过多，仅显示前 {_MAX_CHILDREN_PER_NODE} 项（共 {len(sub_children)} 项）")
+        for child in _sort_nodes(sub_children[:_MAX_CHILDREN_PER_NODE]):
+            _render_tree_node(child, fm, level + 1)
+
+
+def _render_file_row(name: str, file_path: str, fm, level: int) -> None:
+    """Render one file row with an open button and a delete button."""
+    is_active = st.session_state.get("active_file") == file_path
+    btn_type = "primary" if is_active else "secondary"
+    cols = st.columns([6, 1])
+    with cols[0]:
+        if st.button(
+            f"{_indent(level)}📄 {name}",
+            key=f"file_{file_path}",
+            use_container_width=True,
+            type=btn_type,
+            help=file_path,
+        ):
+            _open_file(fm, file_path)
+    with cols[1]:
+        if st.button("🗑", key=f"del_{file_path}", help="删除", use_container_width=True):
+            fm.delete_file(file_path)
+            st.success("已删除")
             st.rerun()
-        if expanded:
-            for child in children:
-                _render_node(child, fm, prefix + "  ")
-    else:
-        file_path = node.get("path", name)
-        c1, c2 = st.columns([8, 1])
-        with c1:
-            label = f"{prefix}📄 {name}"
-            is_active = st.session_state.get("active_file") == file_path
-            btn_type = "primary" if is_active else "secondary"
-            if st.button(label, key=f"file_{file_path}", use_container_width=True, type=btn_type):
-                _open_file(fm, file_path)
-        with c2:
-            if st.button("🗑", key=f"del_{file_path}", help="删除"):
-                fm.delete_file(file_path)
-                st.success("已删除")
-                st.rerun()
 
 
 def _open_file(fm, path: str) -> None:
